@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import insightface
 import cv2
 import numpy as np
+import time
 
 app = FastAPI()
 
@@ -16,49 +17,58 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MODELO MAIS LEVE
+# MODELO ULTRA OTIMIZADO
 model = insightface.app.FaceAnalysis(
-    name="buffalo_s",
+    name="buffalo_sc",
     providers=["CPUExecutionProvider"]
 )
 
-# DETECTION SIZE MENOR = MAIS RÁPIDO
+# DETECTION SIZE MENOR = MAIS VELOCIDADE
 model.prepare(
     ctx_id=0,
-    det_size=(640, 640)
+    det_size=(320, 320)
 )
 
 @app.get("/")
 def home():
+
     return {
-        "status": "online"
+        "status": "online",
+        "model": "buffalo_sc"
     }
 
 @app.post("/recognize")
 async def recognize(file: UploadFile):
 
+    start = time.time()
+
     try:
 
+        # LER ARQUIVO
         contents = await file.read()
 
+        # CONVERTER PARA NUMPY
         nparr = np.frombuffer(
             contents,
             np.uint8
         )
 
+        # DECODIFICAR IMAGEM
         img = cv2.imdecode(
             nparr,
             cv2.IMREAD_COLOR
         )
 
-        # VALIDAÇÃO
+        # VALIDAR
         if img is None:
+
             return {
+                "success": False,
                 "error": "imagem inválida"
             }
 
-        # REDIMENSIONAMENTO
-        max_width = 1280
+        # REDUZIR IMAGEM
+        max_width = 640
 
         h, w = img.shape[:2]
 
@@ -74,8 +84,11 @@ async def recognize(file: UploadFile):
                 (new_w, new_h)
             )
 
-        # PROCESSAMENTO
-        faces = model.get(img)
+        # RECONHECER
+        faces = model.get(
+            img,
+            max_num=1
+        )
 
         result = []
 
@@ -84,19 +97,23 @@ async def recognize(file: UploadFile):
             result.append({
 
                 # posição do rosto
-                "bbox": face.bbox.tolist(),
+                "bbox": {
+                    "x1": float(face.bbox[0]),
+                    "y1": float(face.bbox[1]),
+                    "x2": float(face.bbox[2]),
+                    "y2": float(face.bbox[3]),
+                },
 
                 # confiança
-                "det_score": float(face.det_score),
-
-                # embedding resumido
-                # NÃO RETORNE O VETOR TODO
-                "embedding_preview": face.embedding[:5].tolist()
+                "score": float(face.det_score)
             })
+
+        end = time.time()
 
         return {
             "success": True,
             "faces_found": len(result),
+            "processing_time_seconds": round(end - start, 2),
             "faces": result
         }
 
