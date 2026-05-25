@@ -17,13 +17,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MODELO ULTRA OTIMIZADO
+# MODELO OTIMIZADO
 model = insightface.app.FaceAnalysis(
     name="buffalo_sc",
     providers=["CPUExecutionProvider"]
 )
 
-# DETECTION SIZE MENOR = MAIS VELOCIDADE
 model.prepare(
     ctx_id=0,
     det_size=(320, 320)
@@ -67,7 +66,7 @@ async def recognize(file: UploadFile):
                 "error": "imagem inválida"
             }
 
-        # REDUZIR IMAGEM
+        # REDIMENSIONAR
         max_width = 640
 
         h, w = img.shape[:2]
@@ -84,7 +83,7 @@ async def recognize(file: UploadFile):
                 (new_w, new_h)
             )
 
-        # RECONHECER
+        # PROCESSAR
         faces = model.get(
             img,
             max_num=1
@@ -94,9 +93,13 @@ async def recognize(file: UploadFile):
 
         for face in faces:
 
+            # NORMALIZAR EMBEDDING
+            embedding = face.embedding.astype(
+                np.float32
+            )
+
             result.append({
 
-                # posição do rosto
                 "bbox": {
                     "x1": float(face.bbox[0]),
                     "y1": float(face.bbox[1]),
@@ -104,8 +107,10 @@ async def recognize(file: UploadFile):
                     "y2": float(face.bbox[3]),
                 },
 
-                # confiança
-                "score": float(face.det_score)
+                "score": float(face.det_score),
+
+                # EMBEDDING COMPLETO
+                "embedding": embedding.tolist()
             })
 
         end = time.time()
