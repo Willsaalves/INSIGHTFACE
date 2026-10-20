@@ -1,10 +1,12 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import insightface
 import cv2
 import numpy as np
+import os
 import uuid
 import time
 
@@ -32,6 +34,31 @@ app.add_middleware(
 )
 
 # =========================================================
+# AUTH (opcional)
+# Se FACE_API_KEY estiver definida, toda rota exceto "/" exige o
+# header X-API-Key com o mesmo valor. Sem a variável, nada muda.
+# =========================================================
+
+FACE_API_KEY = os.environ.get("FACE_API_KEY", "").strip()
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+
+    if (
+        FACE_API_KEY
+        and request.method != "OPTIONS"
+        and request.url.path != "/"
+        and request.headers.get("x-api-key") != FACE_API_KEY
+    ):
+
+        return JSONResponse(
+            {"success": False, "error": "unauthorized"},
+            status_code=401
+        )
+
+    return await call_next(request)
+
+# =========================================================
 # MODEL
 # =========================================================
 
@@ -44,6 +71,22 @@ model.prepare(
     ctx_id=0,
     det_size=(320, 320)
 )
+
+# Fotos de grupo: rostos pequenos somem com det_size 320.
+# Mesmo modelo de reconhecimento -> embeddings no mesmo espaço.
+multi_model = insightface.app.FaceAnalysis(
+    name="buffalo_sc",
+    providers=["CPUExecutionProvider"]
+)
+
+MULTI_DET_SIZE = int(os.environ.get("MULTI_DET_SIZE", "1280"))
+
+multi_model.prepare(
+    ctx_id=0,
+    det_size=(MULTI_DET_SIZE, MULTI_DET_SIZE)
+)
+
+MULTI_MAX_SIDE = int(os.environ.get("MULTI_MAX_SIDE", "1920"))
 
 # =========================================================
 # MEMORY DATABASE (MVP)
@@ -392,6 +435,118 @@ async def extract_main_face(
         }
 
 # =========================================================
+# EXTRACT FACES (todos os rostos + embedding, uma chamada)
+# bbox volta na escala da imagem ORIGINAL enviada.
+# =========================================================
+
+@app.post("/extract-faces")
+
+async def extract_faces(
+    file: UploadFile = File(...),
+    min_face_size: int = 40,
+    min_det_score: float = 0.5
+):
+
+    start = time.time()
+
+    try:
+
+        contents = await file.read()
+
+        nparr = np.frombuffer(
+            contents,
+            np.uint8
+        )
+
+        img = cv2.imdecode(
+            nparr,
+            cv2.IMREAD_COLOR
+        )
+
+        if img is None:
+
+            return {
+                "success": False,
+                "error": "invalid image"
+            }
+
+        orig_h, orig_w = img.shape[:2]
+
+        scale = 1.0
+
+        if max(orig_h, orig_w) > MULTI_MAX_SIDE:
+
+            scale = MULTI_MAX_SIDE / max(orig_h, orig_w)
+
+            img = cv2.resize(
+                img,
+                (int(orig_w * scale), int(orig_h * scale))
+            )
+
+        faces = multi_model.get(img)
+
+        response_faces = []
+        skipped = 0
+
+        for face in faces:
+
+            x1, y1, x2, y2 = [float(v) / scale for v in face.bbox]
+
+            w = x2 - x1
+            h = y2 - y1
+
+            det_score = float(face.det_score)
+
+            if min(w, h) < min_face_size or det_score < min_det_score:
+
+                skipped += 1
+                continue
+
+            response_faces.append({
+
+                "bbox": {
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                },
+
+                "confidence": det_score,
+
+                "embedding": face.embedding.astype(
+                    np.float32
+                ).tolist()
+            })
+
+        return {
+
+            "success": True,
+
+            "faces_found": len(response_faces),
+
+            "faces_skipped": skipped,
+
+            "image_size": {
+                "width": orig_w,
+                "height": orig_h
+            },
+
+            "processing_time_seconds": round(
+                time.time() - start,
+                2
+            ),
+
+            "faces": response_faces
+        }
+
+    except Exception as e:
+
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+# =========================================================
 # COMPARE
 # =========================================================
 
@@ -423,7 +578,7 @@ def compare_faces(data: CompareRequest):
                 4
             ),
 
-            "is_match": similarity > 0.75
+            "is_match": bool(similarity > 0.45)
         }
 
     except Exception as e:
